@@ -1,0 +1,31 @@
+{
+  "name": "gnex",
+  "version": "1.0.0",
+  "description": "A lightweight AJAX form handler for fast and simple submissions with SSE support.",
+  "main": "dist/js/gnex.min.js",
+  "scripts": {
+    "build:js": "terser src/js/gnex.js -o dist/js/gnex.min.js",
+    "build": "npm run build:js",
+    "release": "standard-version"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/garius-dev/gnex.git"
+  },
+  "keywords": [
+	"ajax",
+	"form",
+	"post",
+	"sse"
+  ],
+  "author": "Garius Tech",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/garius-dev/gnex/issues"
+  },
+  "homepage": "https://github.com/garius-dev/gnex#readme",
+  "devDependencies": {
+    "standard-version": "^9.5.0",
+    "terser": "^5.39.0"
+  }
+}
