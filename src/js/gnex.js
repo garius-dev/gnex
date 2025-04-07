@@ -126,39 +126,110 @@ const Gnex = {
                     if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
                     const contentType = response.headers.get('Content-Type') || '';
-                    let type, data;
 
-                    // Suporte a SSE
+                    // Novo tratamento SSE, robusto e profissional
                     if (config.sse && contentType.includes('text/event-stream')) {
                         const reader = response.body.getReader();
-                        let buffer = '';
+                        let buffer = ''; // Buffer para acumular dados do stream
 
                         while (true) {
                             const { done, value } = await reader.read();
-                            if (done) break;
+                            if (done) break; // Stream encerrado
+
+                            // Converte os bytes recebidos em texto e adiciona ao buffer
                             buffer += new TextDecoder().decode(value);
 
-                            const lines = buffer.split('\n');
-                            for (let i = 0; i < lines.length - 1; i++) {
-                                const line = lines[i].trim();
-                                if (line.startsWith('data: ')) {
-                                    const eventData = line.slice(6);
-                                    if (config.onProgress) config.onProgress(form, eventData);
-                                    if (config.debug) console.log('[Gnex] SSE Progress:', eventData);
-                                } else if (line.startsWith('event: result')) {
-                                    const nextLine = lines[i + 1];
-                                    if (nextLine && nextLine.startsWith('data: ')) {
-                                        data = JSON.parse(nextLine.slice(6));
-                                        type = 'json';
-                                        if (config.onSuccess) config.onSuccess(type, form, data);
-                                        if (config.debug) console.log('[Gnex] SSE Result:', data);
+                            // Divide o buffer em eventos completos (separados por \n\n)
+                            const events = buffer.split('\n\n');
+                            for (let i = 0; i < events.length - 1; i++) {
+                                const eventText = events[i].trim();
+                                if (!eventText) continue; // Ignora eventos vazios
+
+                                // Parseia o evento SSE
+                                const lines = eventText.split('\n');
+                                let eventType = 'message'; // Padrão W3C se "event" não for especificado
+                                let dataLines = [];
+
+                                for (const line of lines) {
+                                    if (line.startsWith('event:')) {
+                                        eventType = line.slice(6).trim(); // Extrai o tipo de evento
+                                    } else if (line.startsWith('data:')) {
+                                        dataLines.push(line.slice(5)); // Acumula linhas de dados
                                     }
+                                    // Nota: Campos como "id" ou "retry" podem ser adicionados aqui no futuro
+                                }
+
+                                const data = dataLines.join('\n').trim(); // Junta os dados com quebras de linha
+                                if (!data) continue; // Ignora se não houver dados
+
+                                if (config.debug) console.log(`[Gnex] SSE Event: ${eventType}`, data);
+
+                                // Processa o evento com base no tipo
+                                switch (eventType) {
+                                    case 'progress':
+                                        if (config.onProgress) config.onProgress(form, data);
+                                        break;
+                                    case 'done':
+                                        try {
+                                            const jsonData = JSON.parse(data); // Espera JSON no evento "done"
+                                            if (config.onSuccess) config.onSuccess('json', form, jsonData);
+                                        } catch (e) {
+                                            if (config.debug) console.warn('[Gnex] SSE JSON Parse Error:', e);
+                                            if (config.onError) config.onError('sse-parse', form, e);
+                                        }
+                                        break;
+                                    default:
+                                        if (config.debug) console.log(`[Gnex] Unhandled SSE event: ${eventType}`, data);
+                                        // Não dispara erro, apenas loga evento desconhecido
+                                        break;
                                 }
                             }
-                            buffer = lines[lines.length - 1];
+
+                            // O último pedaço pode estar incompleto, mantém no buffer
+                            buffer = events[events.length - 1];
                         }
+
+                        // Processa qualquer evento restante no buffer após o stream encerrar
+                        if (buffer.trim()) {
+                            const lines = buffer.split('\n');
+                            let eventType = 'message';
+                            let dataLines = [];
+
+                            for (const line of lines) {
+                                if (line.startsWith('event:')) {
+                                    eventType = line.slice(6).trim();
+                                } else if (line.startsWith('data:')) {
+                                    dataLines.push(line.slice(5));
+                                }
+                            }
+
+                            const data = dataLines.join('\n').trim();
+                            if (data) {
+                                if (config.debug) console.log(`[Gnex] SSE Final Event: ${eventType}`, data);
+                                switch (eventType) {
+                                    case 'progress':
+                                        if (config.onProgress) config.onProgress(form, data);
+                                        break;
+                                    case 'done':
+                                        try {
+                                            const jsonData = JSON.parse(data);
+                                            if (config.onSuccess) config.onSuccess('json', form, jsonData);
+                                        } catch (e) {
+                                            if (config.debug) console.warn('[Gnex] SSE JSON Parse Error:', e);
+                                            if (config.onError) config.onError('sse-parse', form, e);
+                                        }
+                                        break;
+                                    default:
+                                        if (config.debug) console.log(`[Gnex] Unhandled SSE final event: ${eventType}`, data);
+                                        break;
+                                }
+                            }
+                        }
+
+                        return; // Encerra após processar o stream SSE
                     }
-                    // Respostas normais
+
+                    // Respostas normais (mantidas exatamente como no original)
                     else if (contentType.startsWith('application/json')) {
                         type = 'json';
                         data = await response.json();
