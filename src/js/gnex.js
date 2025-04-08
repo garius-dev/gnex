@@ -123,7 +123,9 @@ const Gnex = {
 
                     const response = await fetch(form.action, { ...fetchOptions, signal: combinedSignal });
 
-                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
+                    };
 
                     const contentType = response.headers.get('Content-Type') || '';
 
@@ -254,6 +256,7 @@ const Gnex = {
                         if (config.debug) console.log('[Gnex] Success:', { type, data });
                     }
                 } catch (error) {
+                    
                     if (error.name === 'TimeoutError' || error.name === 'AbortError') {
                         if (config.onError) config.onError(error.name === 'TimeoutError' ? 'timeout' : 'aborted', form, error);
                         if (config.debug) console.log('[Gnex] Error:', error.name);
@@ -267,8 +270,8 @@ const Gnex = {
                         return;
                     }
 
-                    if (config.onError) config.onError('request', form, error);
-                    if (config.debug) console.log('[Gnex] Error:', error);
+                    if (config.onError) config.onError('request', form, error.message);
+                    if (config.debug) console.log('[Gnex] Error:', error.message);
                 } finally {
                     isSubmitting = false;
                     this._controllers.delete(form);
