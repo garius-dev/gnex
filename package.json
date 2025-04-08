@@ -6,17 +6,18 @@
   "scripts": {
     "build:js": "terser src/js/gnex.js -o dist/js/gnex.min.js",
     "build": "npm run build:js",
-    "release": "standard-version"
+    "release": "standard-version",
+    "test": "jest"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/garius-dev/gnex.git"
   },
   "keywords": [
-	"ajax",
-	"form",
-	"post",
-	"sse"
+    "ajax",
+    "form",
+    "post",
+    "sse"
   ],
   "author": "Garius Tech",
   "license": "MIT",
@@ -25,6 +26,9 @@
   },
   "homepage": "https://github.com/garius-dev/gnex#readme",
   "devDependencies": {
+    "jest": "^29.7.0",
+    "jest-environment-jsdom": "^29.7.0",
+    "jsdom": "^26.0.0",
     "standard-version": "^9.5.0",
     "terser": "^5.39.0"
   }

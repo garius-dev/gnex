@@ -5,330 +5,454 @@
  */
 const Gnex = {
     defaults: {
-        async: false,              // Enable AJAX behavior
-        sse: false,                // Enable Server-Sent Events mode
+        async: false,              // Determines if submission uses AJAX
+        sse: false,                // Enables Server-Sent Events mode
         timeout: 0,                // Request timeout in milliseconds (0 = no timeout)
         retryCount: 0,             // Number of retries on failure
-        headers: {},               // Custom headers
-        onProgress: null,          // Callback for progress: (form, data) => {}
-        setLoadingState: null,     // Callback to apply loading state: (form) => {}
-        resetLoadingState: null,   // Callback to reset loading state: (form) => {}
-        onSuccess: null,           // Success callback: (type, form, data) => {}
-        onError: null,             // Error callback: (type, form, error) => {}
-        beforeSend: null,          // Callback before sending: (form, formData, fetchOptions) => {}
-        cache: false,              // Cache response (true = indefinite, number = seconds)
-        transformData: null,       // Transform formData: (formData) => formData
-        validate: null,            // Validation function: (form) => true/false
-        debug: false               // Enable debug logs
+        headers: {},               // Custom HTTP headers
+        onProgress: null,          // Progress callback: (context, progressData) => {}
+        setLoadingState: null,     // Loading state setter: (context) => {}
+        resetLoadingState: null,   // Loading state resetter: (context) => {}
+        onSuccess: null,           // Success callback: (responseType, context, responseData) => {}
+        onError: null,             // Error callback: (errorType, context, errorDetails) => {}
+        beforeSend: null,          // Pre-request hook: (context, formData, requestOptions) => {}
+        cache: false,              // Cache duration (true = indefinite, number = seconds)
+        transformData: null,       // Data transformer: (formData) => formData
+        validate: null,            // Form validator: (formElement) => true/false
+        debug: false,              // Enables debug logging
+        method: 'GET'              // Default HTTP method
     },
 
-    _controllers: new WeakMap(),
-    _cache: new Map(),
-    _configs: new WeakMap(),
+    _abortControllers: new WeakMap(), // Stores AbortController instances for requests
+    _responseCache: new Map(),        // Caches responses for reuse
+    _formConfigs: new WeakMap(),      // Stores per-form configurations
 
-    init(selector, options) {
+    /**
+     * Initializes form handling for elements matching the given selector.
+     * @param {string} selector - CSS selector for target forms
+     * @param {Object} options - Custom configuration overriding defaults
+     */
+    form(selector, options) {
         if (!selector || typeof selector !== 'string' || selector.trim() === '') {
             throw new Error('A valid non-empty selector is required.');
         }
 
-        const config = { ...this.defaults, ...options };
-        const forms = document.querySelectorAll(selector);
+        const formConfig = { ...this.defaults, ...options };
+        const formElements = document.querySelectorAll(selector);
 
-        if (forms.length === 0) {
+        if (formElements.length === 0) {
             console.warn(`The selector "${selector}" does not match any element.`);
             return;
         }
 
-        forms.forEach(form => this.setupForm(form, config));
+        formElements.forEach(formElement => this._setupFormHandler(formElement, formConfig));
     },
 
-    setupForm(form, config) {
-        this._configs.set(form, config);
-        let isSubmitting = false;
+    /**
+     * Configures a form element with submission handling.
+     * @param {HTMLFormElement} formElement - The form to handle
+     * @param {Object} formConfig - Configuration for this form
+     */
+    _setupFormHandler(formElement, formConfig) {
+        this._formConfigs.set(formElement, formConfig);
+        let isProcessing = false;
         let retryAttempts = 0;
 
-        form.addEventListener('submit', async (e) => {
-            if (isSubmitting) {
-                e.preventDefault();
-                if (config.debug) console.log('[Gnex] Submission already in progress, ignoring.');
+        formElement.addEventListener('submit', async (event) => {
+            if (isProcessing) {
+                event.preventDefault();
+                if (formConfig.debug) console.log('[Gnex] Submission already in progress, ignoring.');
                 return;
             }
 
-            e.preventDefault();
-            isSubmitting = true;
+            event.preventDefault();
+            isProcessing = true;
 
-            // Validação opcional
-            if (config.validate && typeof config.validate === 'function') {
-                if (!config.validate(form)) {
-                    isSubmitting = false;
-                    if (config.debug) console.log('[Gnex] Validation failed.');
+            if (formConfig.validate && typeof formConfig.validate === 'function') {
+                if (!formConfig.validate(formElement)) {
+                    isProcessing = false;
+                    if (formConfig.debug) console.log('[Gnex] Validation failed.');
                     return;
                 }
             }
 
-            const method = form.method || 'POST';
-            let formData = new FormData(form);
+            const requestMethod = formElement.method || 'POST';
+            let requestData = new FormData(formElement);
 
-            if (config.transformData) {
-                formData = config.transformData(formData) || formData;
-                if (config.debug) console.log('[Gnex] FormData transformed:', formData);
+            if (formConfig.transformData) {
+                requestData = formConfig.transformData(requestData) || requestData;
+                if (formConfig.debug) console.log('[Gnex] FormData transformed:', requestData);
             }
 
             const abortController = new AbortController();
-            this._controllers.set(form, abortController);
+            this._abortControllers.set(formElement, abortController);
 
-            const fetchOptions = {
-                method,
-                body: formData,
-                headers: config.headers,
+            const requestOptions = {
+                method: requestMethod,
+                body: requestData,
+                headers: formConfig.headers,
                 signal: abortController.signal,
                 redirect: 'manual'
             };
 
-            if (config.beforeSend && config.beforeSend(form, formData, fetchOptions) === false) {
-                isSubmitting = false;
-                if (config.resetLoadingState) config.resetLoadingState(form);
-                if (config.debug) console.log('[Gnex] Submission cancelled by beforeSend.');
+            if (formConfig.beforeSend && formConfig.beforeSend(formElement, requestData, requestOptions) === false) {
+                isProcessing = false;
+                if (formConfig.resetLoadingState) formConfig.resetLoadingState(formElement);
+                if (formConfig.debug) console.log('[Gnex] Submission cancelled by beforeSend.');
                 return;
             }
 
-            if (config.setLoadingState) config.setLoadingState(form);
+            if (formConfig.setLoadingState) formConfig.setLoadingState(formElement);
 
-            if (!config.async) {
-                if (config.debug) console.log('[Gnex] Submitting form synchronously.');
-                form.submit();
+            if (!formConfig.async) {
+                if (formConfig.debug) console.log('[Gnex] Submitting form synchronously.');
+                formElement.submit();
                 return;
             }
 
-            const cacheKey = `${method}:${form.action}:${JSON.stringify([...formData.entries()])}`;
-            if (config.cache && this._cache.has(cacheKey)) {
-                const cached = this._cache.get(cacheKey);
-                if (Date.now() < cached.expires) {
-                    if (config.debug) console.log('[Gnex] Serving from cache:', cached.data);
-                    if (config.onSuccess) config.onSuccess(cached.type, form, cached.data);
-                    isSubmitting = false;
-                    if (config.resetLoadingState) config.resetLoadingState(form);
+            const cacheKey = `${requestMethod}:${formElement.action}:${JSON.stringify([...requestData.entries()])}`;
+            if (formConfig.cache && this._responseCache.has(cacheKey)) {
+                const cachedResponse = this._responseCache.get(cacheKey);
+                if (Date.now() < cachedResponse.expires) {
+                    if (formConfig.debug) console.log('[Gnex] Serving from cache:', cachedResponse.data);
+                    if (formConfig.onSuccess) formConfig.onSuccess(cachedResponse.responseType, formElement, cachedResponse.data);
+                    isProcessing = false;
+                    if (formConfig.resetLoadingState) formConfig.resetLoadingState(formElement);
                     return;
                 } else {
-                    this._cache.delete(cacheKey);
+                    this._responseCache.delete(cacheKey);
                 }
             }
 
-            const submitForm = async () => {
+            const executeSubmission = async () => {
                 try {
-                    if (config.debug) console.log('[Gnex] Starting submission:', { method, action: form.action });
+                    if (formConfig.debug) console.log('[Gnex] Starting submission:', { method: requestMethod, action: formElement.action });
 
-                    const timeoutSignal = config.timeout > 0 ? AbortSignal.timeout(config.timeout) : null;
+                    const timeoutSignal = formConfig.timeout > 0 ? AbortSignal.timeout(formConfig.timeout) : null;
                     const combinedSignal = timeoutSignal ? AbortSignal.any([abortController.signal, timeoutSignal]) : abortController.signal;
 
-                    const response = await fetch(form.action, { ...fetchOptions, signal: combinedSignal });
+                    const response = await fetch(formElement.action, { ...requestOptions, signal: combinedSignal });
 
                     if (!response.ok) {
                         throw new Error(`HTTP ${response.status}`);
-                    };
+                    }
 
                     const contentType = response.headers.get('Content-Type') || '';
+                    let responseType, responseData;
 
-                    // Novo tratamento SSE, robusto e profissional
-                    if (config.sse && contentType.includes('text/event-stream')) {
-                        const reader = response.body.getReader();
-                        let buffer = ''; // Buffer para acumular dados do stream
-
-                        while (true) {
-                            const { done, value } = await reader.read();
-                            if (done) break; // Stream encerrado
-
-                            // Converte os bytes recebidos em texto e adiciona ao buffer
-                            buffer += new TextDecoder().decode(value);
-
-                            // Divide o buffer em eventos completos (separados por \n\n)
-                            const events = buffer.split('\n\n');
-                            for (let i = 0; i < events.length - 1; i++) {
-                                const eventText = events[i].trim();
-                                if (!eventText) continue; // Ignora eventos vazios
-
-                                // Parseia o evento SSE
-                                const lines = eventText.split('\n');
-                                let eventType = 'message'; // Padrão W3C se "event" não for especificado
-                                let dataLines = [];
-
-                                for (const line of lines) {
-                                    if (line.startsWith('event:')) {
-                                        eventType = line.slice(6).trim(); // Extrai o tipo de evento
-                                    } else if (line.startsWith('data:')) {
-                                        dataLines.push(line.slice(5)); // Acumula linhas de dados
-                                    }
-                                    // Nota: Campos como "id" ou "retry" podem ser adicionados aqui no futuro
-                                }
-
-                                const data = dataLines.join('\n').trim(); // Junta os dados com quebras de linha
-                                if (!data) continue; // Ignora se não houver dados
-
-                                if (config.debug) console.log(`[Gnex] SSE Event: ${eventType}`, data);
-
-                                // Processa o evento com base no tipo
-                                switch (eventType) {
-                                    case 'progress':
-                                        if (config.onProgress) config.onProgress(form, data);
-                                        break;
-                                    case 'done':
-                                        try {
-                                            const jsonData = JSON.parse(data); // Espera JSON no evento "done"
-                                            if (config.onSuccess) config.onSuccess('json', form, jsonData);
-                                        } catch (e) {
-                                            if (config.debug) console.warn('[Gnex] SSE JSON Parse Error:', e);
-                                            if (config.onError) config.onError('sse-parse', form, e);
-                                        }
-                                        break;
-                                    default:
-                                        if (config.debug) console.log(`[Gnex] Unhandled SSE event: ${eventType}`, data);
-                                        // Não dispara erro, apenas loga evento desconhecido
-                                        break;
-                                }
-                            }
-
-                            // O último pedaço pode estar incompleto, mantém no buffer
-                            buffer = events[events.length - 1];
-                        }
-
-                        // Processa qualquer evento restante no buffer após o stream encerrar
-                        if (buffer.trim()) {
-                            const lines = buffer.split('\n');
-                            let eventType = 'message';
-                            let dataLines = [];
-
-                            for (const line of lines) {
-                                if (line.startsWith('event:')) {
-                                    eventType = line.slice(6).trim();
-                                } else if (line.startsWith('data:')) {
-                                    dataLines.push(line.slice(5));
-                                }
-                            }
-
-                            const data = dataLines.join('\n').trim();
-                            if (data) {
-                                if (config.debug) console.log(`[Gnex] SSE Final Event: ${eventType}`, data);
-                                switch (eventType) {
-                                    case 'progress':
-                                        if (config.onProgress) config.onProgress(form, data);
-                                        break;
-                                    case 'done':
-                                        try {
-                                            const jsonData = JSON.parse(data);
-                                            if (config.onSuccess) config.onSuccess('json', form, jsonData);
-                                        } catch (e) {
-                                            if (config.debug) console.warn('[Gnex] SSE JSON Parse Error:', e);
-                                            if (config.onError) config.onError('sse-parse', form, e);
-                                        }
-                                        break;
-                                    default:
-                                        if (config.debug) console.log(`[Gnex] Unhandled SSE final event: ${eventType}`, data);
-                                        break;
-                                }
-                            }
-                        }
-
-                        return; // Encerra após processar o stream SSE
+                    if (formConfig.sse && contentType.includes('text/event-stream')) {
+                        await this._processSseStream(response, formElement, formConfig);
+                        return;
                     }
 
-                    // Respostas normais (mantidas exatamente como no original)
-                    else if (contentType.startsWith('application/json')) {
-                        type = 'json';
-                        data = await response.json();
+                    if (contentType.startsWith('application/json')) {
+                        responseType = 'json';
+                        responseData = await response.json();
                     } else if (response.headers.get('X-Partial-View') === 'true') {
-                        type = 'x-html';
-                        data = await response.text();
+                        responseType = 'x-html';
+                        responseData = await response.text();
                     } else if (response.status >= 300 && response.status < 400) {
-                        type = 'redirect';
-                        data = response.headers.get('Location') || 'unknown';
+                        responseType = 'redirect';
+                        responseData = response.headers.get('Location') || 'unknown';
                     } else {
-                        type = 'full-html';
-                        data = await response.text();
+                        responseType = 'full-html';
+                        responseData = await response.text();
                     }
 
-                    if (!config.sse && type && data) {
-                        if (config.cache) {
-                            const expires = typeof config.cache === 'number' ? Date.now() + config.cache * 1000 : Infinity;
-                            this._cache.set(cacheKey, { type, data, expires });
-                            if (config.debug) console.log('[Gnex] Cached response:', { type, data });
+                    if (!formConfig.sse && responseType && responseData) {
+                        if (formConfig.cache) {
+                            const expires = typeof formConfig.cache === 'number' ? Date.now() + formConfig.cache * 1000 : Infinity;
+                            this._responseCache.set(cacheKey, { responseType, data: responseData, expires });
+                            if (formConfig.debug) console.log('[Gnex] Cached response:', { responseType, responseData });
                         }
-                        if (config.onSuccess) config.onSuccess(type, form, data);
-                        if (config.debug) console.log('[Gnex] Success:', { type, data });
+                        if (formConfig.onSuccess) formConfig.onSuccess(responseType, formElement, responseData);
+                        if (formConfig.debug) console.log('[Gnex] Success:', { responseType, responseData });
                     }
                 } catch (error) {
-                    
                     if (error.name === 'TimeoutError' || error.name === 'AbortError') {
-                        if (config.onError) config.onError(error.name === 'TimeoutError' ? 'timeout' : 'aborted', form, error);
-                        if (config.debug) console.log('[Gnex] Error:', error.name);
+                        if (formConfig.onError) formConfig.onError(error.name === 'TimeoutError' ? 'timeout' : 'aborted', formElement, error);
+                        if (formConfig.debug) console.log('[Gnex] Error:', error.name);
                         return;
                     }
 
-                    if (retryAttempts < config.retryCount) {
+                    if (retryAttempts < formConfig.retryCount) {
                         retryAttempts++;
-                        if (config.debug) console.log(`[Gnex] Retry attempt ${retryAttempts}/${config.retryCount}`);
-                        await submitForm();
+                        if (formConfig.debug) console.log(`[Gnex] Retry attempt ${retryAttempts}/${formConfig.retryCount}`);
+                        await executeSubmission();
                         return;
                     }
 
-                    if (config.onError) config.onError('request', form, error.message);
-                    if (config.debug) console.log('[Gnex] Error:', error.message);
+                    if (formConfig.onError) formConfig.onError('request', formElement, error.message);
+                    if (formConfig.debug) console.log('[Gnex] Error:', error.message);
                 } finally {
-                    isSubmitting = false;
-                    this._controllers.delete(form);
-                    if (config.resetLoadingState) config.resetLoadingState(form);
+                    isProcessing = false;
+                    this._abortControllers.delete(formElement);
+                    if (formConfig.resetLoadingState) formConfig.resetLoadingState(formElement);
                 }
             };
 
-            if (config.onProgress && formData.hasFiles() && !config.sse) {
-                const totalSize = [...formData.entries()].reduce((acc, [key, value]) => acc + (value.size || 0), 0);
-                if (totalSize > 0) {
-                    let loaded = 0;
-                    const proxyFetch = async () => {
-                        const response = await fetch(form.action, fetchOptions);
-                        const reader = response.body.getReader();
-                        while (true) {
-                            const { done, value } = await reader.read();
-                            if (done) break;
-                            loaded += value.length;
-                            const percent = Math.min(100, Math.round((loaded / totalSize) * 100));
-                            config.onProgress(form, percent);
-                            if (config.debug) console.log('[Gnex] Upload progress:', percent + '%');
-                        }
-                        return response;
-                    };
-                    fetchOptions.signal = null;
-                    const response = await proxyFetch();
-                    fetchOptions.signal = abortController.signal;
-                    Object.defineProperty(response, 'body', { value: response.body });
-                    await submitForm();
-                } else {
-                    await submitForm();
-                }
+            if (formConfig.onProgress && requestData.hasFiles() && !formConfig.sse) {
+                await this._handleProgressTracking(formElement, formConfig, requestOptions, executeSubmission);
             } else {
-                await submitForm();
+                await executeSubmission();
             }
         });
     },
 
-    cancel(form) {
-        const controller = this._controllers.get(form);
-        if (controller) {
-            controller.abort();
-            this._controllers.delete(form);
+    /**
+     * Processes Server-Sent Events from a response stream.
+     * @param {Response} response - Fetch response object
+     * @param {HTMLFormElement} formElement - The form context
+     * @param {Object} formConfig - Configuration object
+     */
+    _processSseStream(response, formElement, formConfig) {
+        const reader = response.body.getReader();
+        let eventBuffer = '';
+
+        return new Promise(resolve => {
+            const processStream = async () => {
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    eventBuffer += new TextDecoder().decode(value);
+                    const events = eventBuffer.split('\n\n');
+
+                    for (let i = 0; i < events.length - 1; i++) {
+                        const eventText = events[i].trim();
+                        if (!eventText) continue;
+
+                        const lines = eventText.split('\n');
+                        let eventType = 'message';
+                        let dataLines = [];
+
+                        for (const line of lines) {
+                            if (line.startsWith('event:')) {
+                                eventType = line.slice(6).trim();
+                            } else if (line.startsWith('data:')) {
+                                dataLines.push(line.slice(5));
+                            }
+                        }
+
+                        const eventData = dataLines.join('\n').trim();
+                        if (!eventData) continue;
+
+                        if (formConfig.debug) console.log(`[Gnex] SSE Event: ${eventType}`, eventData);
+
+                        switch (eventType) {
+                            case 'progress':
+                                if (formConfig.onProgress) formConfig.onProgress(formElement, eventData);
+                                break;
+                            case 'done':
+                                try {
+                                    const jsonData = JSON.parse(eventData);
+                                    if (formConfig.onSuccess) formConfig.onSuccess('json', formElement, jsonData);
+                                } catch (e) {
+                                    if (formConfig.debug) console.warn('[Gnex] SSE JSON Parse Error:', e);
+                                    if (formConfig.onError) formConfig.onError('sse-parse', formElement, e);
+                                }
+                                break;
+                            default:
+                                if (formConfig.debug) console.log(`[Gnex] Unhandled SSE event: ${eventType}`, eventData);
+                                break;
+                        }
+                    }
+
+                    eventBuffer = events[events.length - 1];
+                }
+
+                if (eventBuffer.trim()) {
+                    this._processFinalSseEvent(eventBuffer, formElement, formConfig);
+                }
+                resolve();
+            };
+
+            processStream();
+        });
+    },
+
+    /**
+     * Handles any remaining SSE event after stream ends.
+     * @param {string} eventBuffer - Remaining buffer content
+     * @param {HTMLFormElement} formElement - The form context
+     * @param {Object} formConfig - Configuration object
+     */
+    _processFinalSseEvent(eventBuffer, formElement, formConfig) {
+        const lines = eventBuffer.split('\n');
+        let eventType = 'message';
+        let dataLines = [];
+
+        for (const line of lines) {
+            if (line.startsWith('event:')) {
+                eventType = line.slice(6).trim();
+            } else if (line.startsWith('data:')) {
+                dataLines.push(line.slice(5));
+            }
+        }
+
+        const eventData = dataLines.join('\n').trim();
+        if (eventData) {
+            if (formConfig.debug) console.log(`[Gnex] SSE Final Event: ${eventType}`, eventData);
+            switch (eventType) {
+                case 'progress':
+                    if (formConfig.onProgress) formConfig.onProgress(formElement, eventData);
+                    break;
+                case 'done':
+                    try {
+                        const jsonData = JSON.parse(eventData);
+                        if (formConfig.onSuccess) formConfig.onSuccess('json', formElement, jsonData);
+                    } catch (e) {
+                        if (formConfig.debug) console.warn('[Gnex] SSE JSON Parse Error:', e);
+                        if (formConfig.onError) formConfig.onError('sse-parse', formElement, e);
+                    }
+                    break;
+                default:
+                    if (formConfig.debug) console.log(`[Gnex] Unhandled SSE final event: ${eventType}`, eventData);
+                    break;
+            }
         }
     },
 
-    _handleSuccess(form, type, data) {
-        const config = this._configs.get(form) || this.defaults;
-        if (config.onSuccess) config.onSuccess(type, form, data);
+    /**
+     * Tracks upload progress for forms with files.
+     * @param {HTMLFormElement} formElement - The form context
+     * @param {Object} formConfig - Configuration object
+     * @param {Object} requestOptions - Fetch options
+     * @param {Function} executeSubmission - Submission function
+     */
+    _handleProgressTracking(formElement, formConfig, requestOptions, executeSubmission) {
+        const totalSize = [...requestOptions.body.entries()].reduce((acc, [_, value]) => acc + (value.size || 0), 0);
+        if (totalSize <= 0) return executeSubmission();
+
+        let uploadedBytes = 0;
+        const proxyFetch = async () => {
+            const response = await fetch(formElement.action, requestOptions);
+            const reader = response.body.getReader();
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                uploadedBytes += value.length;
+                const progressPercent = Math.min(100, Math.round((uploadedBytes / totalSize) * 100));
+                formConfig.onProgress(formElement, progressPercent);
+                if (formConfig.debug) console.log('[Gnex] Upload progress:', progressPercent + '%');
+            }
+            return response;
+        };
+
+        requestOptions.signal = null;
+        return proxyFetch().then(response => {
+            requestOptions.signal = this._abortControllers.get(formElement).signal;
+            Object.defineProperty(response, 'body', { value: response.body });
+            return executeSubmission();
+        });
     },
 
-    _handleError(form, type, error) {
-        const config = this._configs.get(form) || this.defaults;
-        if (config.onError) config.onError(type, form, error);
+    /**
+     * Performs a standalone AJAX request.
+     * @param {string} url - Target URL
+     * @param {Object} options - Custom configuration
+     * @returns {Object} Control object with cancel method
+     */
+    load(url, options = {}) {
+        const requestConfig = { ...this.defaults, ...options, async: true };
+        const abortController = new AbortController();
+        const requestId = `gnex-load-${Date.now()}`;
+        const requestContext = { id: requestId };
+
+        this._abortControllers.set(requestContext, abortController);
+
+        const requestOptions = {
+            method: requestConfig.method,
+            headers: requestConfig.headers,
+            signal: abortController.signal,
+            redirect: 'manual'
+        };
+
+        if (requestConfig.beforeSend && requestConfig.beforeSend(null, null, requestOptions) === false) {
+            if (requestConfig.resetLoadingState) requestConfig.resetLoadingState(null);
+            if (requestConfig.debug) console.log('[Gnex] Load cancelled by beforeSend.');
+            return { cancel: () => this.cancel(requestContext) };
+        }
+
+        (async () => {
+            try {
+                if (requestConfig.setLoadingState) requestConfig.setLoadingState(null);
+
+                const response = await fetch(url, requestOptions);
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                const contentType = response.headers.get('Content-Type') || '';
+                let responseType, responseData;
+
+                if (requestConfig.sse && contentType.includes('text/event-stream')) {
+                    await this._processSseStream(response, null, requestConfig);
+                    return;
+                }
+
+                if (contentType.includes('application/json')) {
+                    responseType = 'json';
+                    responseData = await response.json();
+                } else if (response.headers.get('X-Partial-View') === 'true') {
+                    responseType = 'x-html';
+                    responseData = await response.text();
+                } else {
+                    responseType = 'text';
+                    responseData = await response.text();
+                }
+
+                if (requestConfig.onSuccess) requestConfig.onSuccess(responseType, null, responseData);
+            } catch (error) {
+                if (requestConfig.onError) requestConfig.onError('request', null, error);
+            } finally {
+                this._abortControllers.delete(requestContext);
+                if (requestConfig.resetLoadingState) requestConfig.resetLoadingState(null);
+            }
+        })();
+
+        return { cancel: () => this.cancel(requestContext) };
+    },
+
+    /**
+     * Cancels an ongoing request.
+     * @param {Object|HTMLFormElement} context - Form element or request context
+     */
+    cancel(context) {
+        const controller = this._abortControllers.get(context);
+        if (controller) {
+            controller.abort();
+            this._abortControllers.delete(context);
+        }
+    },
+
+    /**
+     * Triggers success callback for a form.
+     * @param {HTMLFormElement} formElement - The form context
+     * @param {string} responseType - Type of response
+     * @param {any} responseData - Response data
+     */
+    _handleSuccess(formElement, responseType, responseData) {
+        const config = this._formConfigs.get(formElement) || this.defaults;
+        if (config.onSuccess) config.onSuccess(responseType, formElement, responseData);
+    },
+
+    /**
+     * Triggers error callback for a form.
+     * @param {HTMLFormElement} formElement - The form context
+     * @param {string} errorType - Type of error
+     * @param {any} errorDetails - Error details
+     */
+    _handleError(formElement, errorType, errorDetails) {
+        const config = this._formConfigs.get(formElement) || this.defaults;
+        if (config.onError) config.onError(errorType, formElement, errorDetails);
     }
 };
 
+/**
+ * Checks if FormData contains files.
+ * @returns {boolean} True if files are present
+ */
 FormData.prototype.hasFiles = function () {
     return [...this.values()].some(value => value instanceof File || value instanceof Blob);
 };
+
+module.exports = Gnex;
