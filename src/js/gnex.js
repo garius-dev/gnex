@@ -454,5 +454,3 @@ const Gnex = {
 FormData.prototype.hasFiles = function () {
     return [...this.values()].some(value => value instanceof File || value instanceof Blob);
 };
-
-module.exports = Gnex;
