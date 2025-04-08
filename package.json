@@ -1,6 +1,6 @@
 {
   "name": "gnex",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "A lightweight AJAX form handler for fast and simple submissions with SSE support.",
   "main": "dist/js/gnex.min.js",
   "scripts": {
